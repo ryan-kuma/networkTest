@@ -47,23 +47,17 @@ static void listener_cb(struct evconnlistener *, evutil_socket_t,
 	struct sockaddr*, int socklen, void *);
 static void signal_cb(evutil_socket_t, short, void *);
 static void write_eventcb(struct bufferevent *, void *);
-
+static void error_eventcb(struct bufferevent *, short, void *);
 
 struct timeval lasttime;
-struct eventp{
-	struct event_base *base;
-	struct event *timeout;	
-};
-
-struct eventp multievent;
+struct event timeout;
+int event_is_persistent;
 
 static void
 timeout_cb(evutil_socket_t fd, short event, void *arg)
 {
 	struct timeval newtime, difference;
-	struct eventp *pevent = (struct eventp *)arg;
-	struct event_base *base = pevent->base;
-	struct event *timeout = pevent->timeout;
+	struct event_base *base = arg;
 	double elapsed;
 
 	evutil_gettimeofday(&newtime, NULL);
@@ -76,25 +70,27 @@ timeout_cb(evutil_socket_t fd, short event, void *arg)
 
 	
 	struct bufferevent *bev;
-	bev = bufferevent_socket_new(base, fd, BEV_OPT_CLOSE_ON_FREE);
+//	bev = bufferevent_socket_new(base, fd, BEV_OPT_CLOSE_ON_FREE);
+	bev = bufferevent_socket_new(base, fd, 0);
 	if(!bev){
 		fprintf(stderr, "error constructing bufferevent\n");	
 		event_base_loopbreak(base);
 		return ;
 	}
-	bufferevent_setcb(bev, NULL, write_eventcb, NULL, NULL);
+	bufferevent_setcb(bev, NULL, write_eventcb, error_eventcb, NULL);
 	bufferevent_enable(bev, EV_WRITE);
 	bufferevent_enable(bev, EV_READ);
 
 	bufferevent_write(bev, MESSAGE, strlen(MESSAGE));
 
-	lasttime = newtime;
 
-	struct timeval tv;
-	evutil_timerclear(&tv);
-	tv.tv_sec = 2;
-	event_add(timeout, &tv);
-
+	if (event_is_persistent == 1) {
+		lasttime = newtime; 
+		struct timeval tv;
+		evutil_timerclear(&tv);
+		tv.tv_sec = 2;
+		event_add(&timeout, &tv);
+	}
 }
 
 int main(int argc, char **argv)
@@ -146,20 +142,19 @@ static void listener_cb(struct evconnlistener * listener, evutil_socket_t fd,
 {
 	struct event_base *base = user_data;
 
-	struct event* timeout;
 	struct timeval tv;
 	int flags;
 
 	flags = EV_PERSIST;
 
-	multievent.base = base;
-	multievent.timeout = timeout;
 	/* Initialize one event */
-	timeout =  event_new(base ,fd, 0, timeout_cb, (void *)&multievent);
+	event_set(&timeout, fd, 0, timeout_cb, base);
+	event_base_set(base, &timeout);
+	event_is_persistent = 1;
 
 	evutil_timerclear(&tv);
 	tv.tv_sec = 2;
-	event_add(timeout, &tv);
+	event_add(&timeout, &tv);
 
 	evutil_gettimeofday(&lasttime, NULL);
 
@@ -181,6 +176,20 @@ static void write_eventcb(struct bufferevent *bev, void *user_data)
 		printf("flushed answer\n");
 		bufferevent_free(bev);
 	}
+
+}
+
+static void error_eventcb(struct bufferevent *bev, short events, void *user_data)
+{
+	if (events & BEV_EVENT_EOF) {
+		printf("Connection closed.\n");
+	} else if (events & BEV_EVENT_ERROR) {
+		printf("got an error on the connection: %s\n", strerror(errno));
+	}
+
+	bufferevent_free(bev);
+	
+	event_is_persistent = 0;
 
 }
 
